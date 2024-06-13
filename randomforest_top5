@@ -1,0 +1,158 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score
+from sklearn.preprocessing import OneHotEncoder
+from collections import Counter
+from azureml.core import Run
+import pickle
+from azureml.core import Workspace
+from azureml.core.model import Model
+from azureml.core.webservice import Webservice
+#add code related to the register of model ..
+
+def change_url_score():
+    ws = Workspace.from_config()
+    endpoint_name= 'genai-endpoint6'
+    endpoint = Webservice(ws, endpoint_name)
+    #line is missing
+    endpoint.update()
+
+
+def load_data(file_path):
+    """Load data from an Excel file."""
+    data = pd.read_excel(file_path)
+    return data
+
+def one_hot_encode_input_train(train_df, categorical_cols):
+    """One-hot encode categorical columns in the training data."""
+    encoder = OneHotEncoder(handle_unknown='ignore')
+    encoder.fit(train_df[categorical_cols])
+    train_encoded_data = encoder.transform(train_df[categorical_cols])
+    category_names = [f'{col}_{category}' for col, categories in zip(categorical_cols, encoder.categories_) for category in categories]
+    train_encoded_df = pd.DataFrame(train_encoded_data.toarray(), columns=category_names, index=train_df.index)
+    return train_encoded_df, encoder
+
+def one_hot_encode_input_test(encoder, test_df, categorical_cols):
+    """One-hot encode categorical columns in the test data."""
+    test_encoded_data = encoder.transform(test_df[categorical_cols])
+    category_names = [f'{col}_{category}' for col, categories in zip(categorical_cols, encoder.categories_) for category in categories]
+    test_encoded_df = pd.DataFrame(test_encoded_data.toarray(), columns=category_names, index=test_df.index)
+    return test_encoded_df
+
+def train_random_forest(X_train, y_train):
+    """Train a Random Forest classifier."""
+    rf_classifier = RandomForestClassifier()
+    param_grid = {
+        'n_estimators': [100, 200, 300],
+        'max_depth': [None, 10, 20],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
+    grid_search = GridSearchCV(estimator=rf_classifier, param_grid=param_grid, cv=3, n_jobs=-1)
+    grid_search.fit(X_train, y_train)
+    best_params = grid_search.best_params_
+    best_rf_classifier = RandomForestClassifier(**best_params)
+    best_rf_classifier.fit(X_train, y_train)
+    return best_rf_classifier, best_params
+
+def evaluate_model(model, X_test, y_test):
+    """Evaluate the trained model."""
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    print("---accuracy",accuracy)
+    # precision = precision_score(y_test, y_pred)
+    # print("----preciso",precision)
+    # recall = recall_score(y_test, y_pred)
+    # print("--------accuracy", recall)
+    return accuracy
+
+def top_predictions_from_decision_trees(model, X_test, n_top=5):
+    """Get top predictions from each decision tree in the Random Forest."""
+    individual_trees = model.estimators_
+    n_trees = len(model.estimators_)
+    class_map = {i: label for i, label in enumerate(model.classes_)}
+    print("---classmap",class_map)
+    individual_predictions_list = []
+    for tree in individual_trees:
+        tree_prediction = tree.predict(X_test)
+        tree_prediction_labels = [class_map[prediction] for prediction in tree_prediction]
+        individual_predictions_list.append(tree_prediction_labels)
+
+    list_of_lists = individual_predictions_list
+    flattened_list = [item for sublist in list_of_lists for item in sublist]
+    element_counts = Counter(flattened_list)
+    sorted_elements = sorted(element_counts.items(), key=lambda x: x[1], reverse=True)
+    top_5_elements = sorted_elements[:10]
+    total_count = sum(count for _, count in sorted_elements)
+    top_5_with_percentage = [(element, count, (count / total_count) * 100) for element, count in top_5_elements]
+    df_top_5 = pd.DataFrame(top_5_with_percentage, columns=['Element', 'Count', 'Percentage'])
+    print("Top 5 elements with count and percentage:")
+    print(df_top_5)
+
+    return individual_predictions_list
+
+# Load the dataset
+if __name__=="__main__":
+
+
+    file_path = "Model1.xlsx"
+    data = load_data(file_path)
+
+    # Define categorical columns for one-hot encoding
+    categorical_cols = data.columns.tolist()[:-1]  # All columns except the last one
+
+    print(categorical_cols)
+    print("----len",len(categorical_cols))
+    # One-hot encode categorical columns in the dataset
+    X_encoded, encoder = one_hot_encode_input_train(data, categorical_cols)
+
+    # Separate features and target variable
+    X = X_encoded
+    y = data.iloc[:, -1]
+
+    # Split the data into training and testing sets (70% train, 30% test)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+
+    # Train a Random Forest classifier
+    best_rf_classifier, best_params = train_random_forest(X_train, y_train)
+
+    dic = {'model':best_rf_classifier, 'encoder': encoder}
+
+    f = open('model_dic.pkl','wb')
+    pickle.dump(dic, f)
+
+    # Assuming `run` and `ws` are already defined
+    run = Run.get_context()
+    ws = run.experiment.workspace
+
+    # # # Register the model in Azure Machine Learning
+    model_name = 'model_dic'
+    model_description = "Description of your model"
+    # # model_tags = {"tag1": "value1", "tag2": "value2"}  # Optional
+
+    # # # Register the model
+    azure_model = Model.register(workspace=ws,
+                                model_name= model_name,
+                                model_path='model_dic.pkl',
+                                description=model_description,
+                                )
+
+
+
+
+    # Evaluate the model
+    accuracy = evaluate_model(best_rf_classifier, X_test, y_test)
+
+    print("Evaluation Metrics:")
+    print("Accuracy:", accuracy)
+    # print("Precision:", precision)
+    # print("Recall:", recall)
+
+    # Get top predictions from each decision tree in the forest
+    print("\nTop 5 predictions from each decision tree:")
+    top_predictions = top_predictions_from_decision_trees(best_rf_classifier, X_test)
+
+    # change_url_score()
+
+
